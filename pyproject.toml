@@ -1,0 +1,20 @@
+[project]
+name = "air-quality-streaming-labs"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "Binh Minh",email = "binhm63@gmail.com"}
+]
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "polars (>=1.36.0,<2.0.0)",
+    "pyarrow (>=22.0.0,<23.0.0)",
+    "tqdm (>=4.67.1,<5.0.0)",
+    "plotly (>=6.5.0,<7.0.0)"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
