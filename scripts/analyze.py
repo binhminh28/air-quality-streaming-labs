@@ -3,7 +3,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 # 1. Load dữ liệu
-df = pl.read_parquet("data/processed/air_quality_merged.parquet")
+df = pl.read_parquet("data/processed/air_quality_5s_noise.parquet")
 
 # 2. LÀM SẠCH: Bỏ cột PM10 (vì thiếu 96%) và um003 (ít dùng)
 df_clean = df.drop(["pm10", "um003"])

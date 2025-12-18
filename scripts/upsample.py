@@ -1,13 +1,13 @@
 import polars as pl
 import numpy as np
 
-def upscale_to_3s_with_noise(input_parquet, output_parquet):
-    # 1. Đọc và tạo khung thời gian 3s
+def upscale_to_5s_with_noise(input_parquet, output_parquet):
+    # 1. Đọc và tạo khung thời gian 5s
     df = pl.read_parquet(input_parquet).sort("datetime")
     
     time_grid = pl.datetime_range(
         start=df["datetime"].min(), end=df["datetime"].max(),
-        interval="3s", eager=True
+        interval="5s", eager=True
     ).alias("datetime").to_frame()
 
     # 2. Join & Interpolate (Tạo đường mượt)
@@ -36,7 +36,7 @@ def upscale_to_3s_with_noise(input_parquet, output_parquet):
 
     # 4. Lưu
     final_df.write_parquet(output_parquet)
-    print(f"Done! Rows: {n_rows:,}. Upscaled 3s with Gaussian Noise.")
+    print(f"Done! Rows: {n_rows:,}. Upscaled 5s with Gaussian Noise.")
 
 if __name__ == "__main__":
-    upscale_to_3s_with_noise("data/processed/air_quality_merged.parquet", "data/processed/air_quality_3s_noise.parquet")
+    upscale_to_5s_with_noise("data/processed/air_quality_merged.parquet", "data/processed/air_quality_5s_noise.parquet")
