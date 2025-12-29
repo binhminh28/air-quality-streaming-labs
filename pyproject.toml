@@ -16,6 +16,12 @@ numpy = "^2.4.0"
 kafka-python = "^2.3.0"
 pyspark = "3.5.3"
 cassandra-driver = "^3.29.3"
+streamlit = "^1.28.0"
+pandas = "^2.2.0"
+websockets = "^12.0"
+fastapi = "^0.104.0"
+uvicorn = "^0.24.0"
+requests = "^2.31.0"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
