@@ -173,7 +173,7 @@ air-quality-streaming-project/
 │   └── air_quality.parquet            # nguồn dữ liệu mô phỏng (thay CSV)
 │
 ├── kafka/
-│   ├── producer_parquet.py            # đọc parquet & gửi kafka
+│   ├── producer.py            # đọc parquet & gửi kafka
 │   ├── producer_api.py
 │   └── consumer_debug.py
 │
