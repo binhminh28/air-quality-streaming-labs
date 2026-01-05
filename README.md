@@ -36,59 +36,51 @@ Dự án áp dụng kiến trúc **Stream Processing Pipeline** hiện đại, �
 * **Công nghệ:** Streamlit & WebSocket.
 * **Chức năng:** Cung cấp giao diện trực quan cho người dùng cuối. Dashboard kết nối qua WebSocket để nhận dữ liệu mới nhất từ hệ thống và vẽ biểu đồ biến thiên chất lượng không khí, đồng thời hiển thị cảnh báo màu sắc tương ứng với mức độ ô nhiễm.
 
-%% Kiến trúc hệ thống Real-time Air Quality
-graph TD
-    %% Định nghĩa Style
-    classDef source fill:#f9f,stroke:#333,stroke-width:2px;
-    classDef kafka fill:#ff9,stroke:#333,stroke-width:2px;
-    classDef process fill:#9cf,stroke:#333,stroke-width:2px;
-    classDef db fill:#bfb,stroke:#333,stroke-width:2px;
-    classDef ui fill:#f96,stroke:#333,stroke-width:2px;
+```
+===================================================================================================
+                               HỆ THỐNG GIÁM SÁT CHẤT LƯỢNG KHÔNG KHÍ
+===================================================================================================
 
-    subgraph Data_Source [Tầng 1: Data Simulation]
-        A[("📄 Parquet Files<br>(History Data)")]:::source
-        B[("🐍 Producer.py<br>(Simulate Sensor)")]:::source
-    end
+[ TẦNG 1: NGUỒN DỮ LIỆU & THU THẬP ]           [ TẦNG 2: XỬ LÝ DỮ LIỆU (STREAM PROCESSING) ]
+                                              
++-----------------------+                      +-------------------------------------------------+
+|   DATA SIMULATION     |                      |           APACHE SPARK CLUSTER                  |
+|                       |       JSON           |                                                 |
+|  [ File Parquet ]     |      Message         |   +-----------------------------------------+   |
+|  (Dữ liệu lịch sử)    |     (5s/msg)         |   |      Spark Structured Streaming         |   |
+|         |             |                      |   |                                         |   |
+|         v             |    +----------+      |   | 1. Read Stream (Kafka Consumer)         |   |
+|   [ Producer.py ]     |--->|  KAFKA   |----->|     2. Parse JSON Schema                    |   |
+| (Giả lập Sensor IoT)  |    +----------+      |     3. Tính AQI (UDF: PM2.5, PM10)          |   |
++-----------------------+     (Topic:          |     4. Gán nhãn (Tốt/Xấu/Nguy hại)          |   |
+                             air_quality       |     5. Micro-batch Processing               |   |
+                              _realtime)       +----------------------+------------------+   |
+                                                                      |                      |
+                                                                      | foreachBatch         |
+                                                                      v                      |
+                                               +-------------------------------------------------+
+                                               
+                                               
+[ TẦNG 4: HIỂN THỊ & API (SERVING) ]            [ TẦNG 3: LƯU TRỮ (STORAGE) ]
 
-    subgraph Ingestion_Layer [Tầng 2: Ingestion]
-        C{{"Apache Kafka<br>(Topic: air_quality)"}}:::kafka
-    end
-
-    subgraph Processing_Layer [Tầng 3: Stream Processing]
-        D["⚡ Apache Spark<br>Structured Streaming"]:::process
-        D1["🔍 Schema Validation"]
-        D2["🧮 UDF: Calc AQI<br>(PM2.5, PM10)"]
-    end
-
-    subgraph Storage_Layer [Tầng 4: Storage]
-        E[("🗄️ Apache Cassandra<br>(Keyspace: air_quality)")]:::db
-    end
-
-    subgraph Serving_Layer [Tầng 5: Serving & UI]
-        F["🔌 WebSocket Server<br>(Python API)"]:::ui
-        G["📊 Streamlit Dashboard<br>(Real-time Charts)"]:::ui
-    end
-
-    %% Luồng đi của dữ liệu
-    A -->|Read Raw| B
-    B -->|JSON Message (5s/record)| C
-    C -->|Subscribe| D
-    
-    %% Chi tiết trong Spark
-    D --> D1
-    D1 --> D2
-    D2 -->|Micro-batch| D
-    
-    %% Ghi xuống DB
-    D -->|foreachBatch (Bulk Write)| E
-    
-    %% Hiển thị
-    F -->|CQL Select (Latest N)| E
-    G -->|WebSocket Connection| F
-    
-    %% Legend/Note
-    linkStyle 1 stroke:red,stroke-width:2px;
-    linkStyle 5 stroke:blue,stroke-width:2px;
++-----------------------+                      +-------------------------------------------------+
+|   VISUALIZATION       |      WebSocket       |             APACHE CASSANDRA                    |
+|                       |      (Realtime)      |                                                 |
+|  [ Streamlit App ]    |<---------------------|   Keyspace: air_quality                         |
+|   (Dashboard UI)      |                      |   Table:    realtime_data                       |
+|                       |                      |                                                 |
+| - Biểu đồ Line Chart  |                      |   [ Schema ]                                    |
+| - Cảnh báo màu sắc    |                      |   - location_id (Partition Key)                 |
+| - Chỉ số AQI hiện tại |                      |   - datetime (Clustering Key)                   |
+|                       |      CQL Query       |   - pm25, pm10, aqi, quality...                 |
++-----------------------+      (Select)        +----------------------+--------------------------+
+           ^                   (Latest N)                             ^
+           |                       |                                  |
+           +-----------------------+                                  |
+           |   [ WebSocket Server ]                                   |
+           |      (Python API)                                        |
+           +----------------------------------------------------------+
+```
 
 ---
 
