@@ -1,1 +1,28 @@
+# Data directories
 data/raw/
+data/processed/
+
+# Log files
+logs/*.log
+logs/*.pid
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
