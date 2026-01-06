@@ -23,18 +23,24 @@ if ! command -v spark-submit &> /dev/null; then
     exit 1
 fi
 
-# Kiểm tra Cassandra đang chạy
-if ! docker ps | grep -q cassandra; then
-    echo "❌ Cassandra container không đang chạy!"
+# Kiểm tra Cassandra cluster đang chạy (ít nhất 1 node)
+CASSANDRA_COUNT=$(docker ps --filter "name=cassandra" --format "{{.Names}}" | wc -l)
+if [ "$CASSANDRA_COUNT" -eq 0 ]; then
+    echo "❌ Cassandra cluster không đang chạy!"
     echo "   Chạy: cd docker && docker-compose up -d"
     exit 1
+else
+    echo "✅ Found $CASSANDRA_COUNT Cassandra node(s)"
 fi
 
-# Kiểm tra Kafka đang chạy
-if ! docker ps | grep -q kafka; then
-    echo "❌ Kafka container không đang chạy!"
+# Kiểm tra Kafka cluster đang chạy (ít nhất 1 broker)
+KAFKA_COUNT=$(docker ps --filter "name=kafka" --format "{{.Names}}" | wc -l)
+if [ "$KAFKA_COUNT" -eq 0 ]; then
+    echo "❌ Kafka cluster không đang chạy!"
     echo "   Chạy: cd docker && docker-compose up -d"
     exit 1
+else
+    echo "✅ Found $KAFKA_COUNT Kafka broker(s)"
 fi
 
 echo "✅ Services đang chạy"

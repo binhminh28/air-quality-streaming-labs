@@ -9,10 +9,14 @@ import uvicorn
 import os
 import asyncio
 
-CASSANDRA_HOST = os.getenv("CASSANDRA_HOST", "localhost")
-CASSANDRA_PORT = int(os.getenv("CASSANDRA_PORT", "9042"))
-CASSANDRA_KEYSPACE = "air_quality"
-CASSANDRA_TABLE = "realtime_data"
+# Cấu hình Cassandra - hỗ trợ multiple contact points
+# Format: "host1:port1,host2:port2" hoặc "host1,host2" (dùng port mặc định)
+CASSANDRA_CONTACT_POINTS = os.getenv(
+    "CASSANDRA_CONTACT_POINTS",
+    "localhost:9042,localhost:9043"
+)
+CASSANDRA_KEYSPACE = os.getenv("CASSANDRA_KEYSPACE", "air_quality")
+CASSANDRA_TABLE = os.getenv("CASSANDRA_TABLE", "realtime_data")
 HTTP_PORT = int(os.getenv("HTTP_PORT", "8765"))
 
 app = FastAPI()
@@ -22,9 +26,26 @@ class CassandraStreamer:
         self.cluster = None
         self.session = None
         
+    def _parse_contact_points(self):
+        """Parse contact points từ chuỗi 'host1:port1,host2:port2' thành list tuples"""
+        contact_points = []
+        for point in CASSANDRA_CONTACT_POINTS.split(','):
+            point = point.strip()
+            if ':' in point:
+                host, port = point.split(':')
+                contact_points.append((host.strip(), int(port.strip())))
+            else:
+                # Nếu không có port, dùng port mặc định 9042
+                contact_points.append((point.strip(), 9042))
+        return contact_points
+        
     def connect(self):
         if self.cluster is None:
-            self.cluster = Cluster([CASSANDRA_HOST], port=CASSANDRA_PORT)
+            contact_points = self._parse_contact_points()
+            print(f"Connecting to Cassandra cluster at: {contact_points}")
+            # Cluster() nhận list tuples (host, port) hoặc list host strings
+            # Vì mỗi node có thể có port khác nhau, ta truyền list tuples trực tiếp
+            self.cluster = Cluster(contact_points)
             self.session = self.cluster.connect()
             self.session.set_keyspace(CASSANDRA_KEYSPACE)
         

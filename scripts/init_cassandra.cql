@@ -1,9 +1,9 @@
 -- Script khởi tạo keyspace và table cho Cassandra
 -- Chạy: docker exec -it cassandra cqlsh -f /scripts/init_cassandra.cql
 
--- Tạo keyspace
+-- Tạo keyspace với replication_factor=2 cho cluster 2 nodes
 CREATE KEYSPACE IF NOT EXISTS air_quality
-WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};
+WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 2};
 
 -- Sử dụng keyspace
 USE air_quality;

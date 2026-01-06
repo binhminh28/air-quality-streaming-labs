@@ -18,15 +18,22 @@ def fetch_data_from_websocket(limit=1000):
         response = requests.get(f"{WEBSOCKET_SERVER_URL}?limit={limit}", timeout=10)
         if response.status_code == 200:
             result = response.json()
-            if result.get('data'):
-                df = pd.DataFrame(result['data'])
-                df['datetime'] = pd.to_datetime(df['datetime'], format='ISO8601', errors='coerce')
-                df = df.sort_values('datetime', ascending=False).reset_index(drop=True)
-                return df
+            data = result.get('data', [])
+            if data and len(data) > 0:
+                df = pd.DataFrame(data)
+                # Parse datetime - handle multiple formats
+                if 'datetime' in df.columns:
+                    df['datetime'] = pd.to_datetime(df['datetime'], errors='coerce', utc=True)
+                    # Remove rows with invalid datetime
+                    df = df.dropna(subset=['datetime'])
+                if not df.empty:
+                    df = df.sort_values('datetime', ascending=False).reset_index(drop=True)
+                    return df
         return pd.DataFrame()
     except requests.exceptions.ConnectionError:
         return pd.DataFrame()
     except Exception as e:
+        st.error(f"Error fetching data: {str(e)}")
         return pd.DataFrame()
 
 def get_aqi_color(aqi):
@@ -58,8 +65,16 @@ def main():
         data_limit = st.slider("Số lượng records", 100, 5000, 1000)
         auto_refresh = st.checkbox("🔄 Auto-refresh (5 giây)", value=True)
         
-        if st.button("🔄 Refresh ngay", use_container_width=True):
-            st.rerun()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔄 Refresh", use_container_width=True):
+                fetch_data_from_websocket.clear()
+                st.rerun()
+        with col2:
+            if st.button("🗑️ Clear Cache", use_container_width=True):
+                fetch_data_from_websocket.clear()
+                st.success("Cache cleared!")
+                st.rerun()
     
     display_dashboard(data_limit)
     
@@ -68,6 +83,7 @@ def main():
         st.rerun()
 
 def display_dashboard(data_limit):
+    # Clear cache if button is pressed (handled in sidebar)
     df = fetch_data_from_websocket(limit=data_limit)
     
     if df.empty:
@@ -87,16 +103,22 @@ def display_dashboard(data_limit):
                 if response.status_code == 200:
                     st.success("✅ WebSocket server đang chạy")
                     
-                    # Check data
-                    data_response = requests.get("http://localhost:8765/api/data?limit=1", timeout=2)
+                    # Check data directly
+                    data_response = requests.get("http://localhost:8765/api/data?limit=10", timeout=5)
                     if data_response.status_code == 200:
                         data_json = data_response.json()
-                        if data_json.get('count', 0) > 0:
-                            st.success(f"✅ Có {data_json.get('count')} records")
+                        count = data_json.get('count', 0)
+                        if count > 0:
+                            st.success(f"✅ Có {count} records trong database")
+                            st.info("💡 Nếu vẫn không hiển thị, thử refresh lại trang (F5)")
+                            # Try to show raw data for debugging
+                            with st.expander("🔍 Debug: Xem dữ liệu thô"):
+                                st.json(data_json)
                         else:
                             st.warning("⚠️ Server chạy nhưng chưa có dữ liệu")
+                            st.info("💡 Đợi thêm vài giây để Producer và Spark Streaming xử lý")
                     else:
-                        st.warning("⚠️ Không thể lấy dữ liệu từ API")
+                        st.warning(f"⚠️ Không thể lấy dữ liệu từ API (Status: {data_response.status_code})")
                 else:
                     st.error("❌ WebSocket server không phản hồi đúng")
             except requests.exceptions.ConnectionError:

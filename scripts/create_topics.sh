@@ -3,7 +3,8 @@
 # Script tạo Kafka topics cho dự án Air Quality Streaming
 # Sử dụng Kafka container hoặc local Kafka
 
-KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS:-localhost:9092}
+# Hỗ trợ multiple brokers cho cluster
+KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS:-localhost:9092,localhost:9093,localhost:9094}
 
 echo "🔧 Creating Kafka topics..."
 echo "Kafka Bootstrap Servers: $KAFKA_BOOTSTRAP_SERVERS"
@@ -29,14 +30,14 @@ if [ ! -z "$KAFKA_CONTAINER" ]; then
         --bootstrap-server localhost:29092 \
         --topic air_quality_realtime \
         --partitions 3 \
-        --replication-factor 1 \
+        --replication-factor 3 \
         --if-not-exists
 else
     $KAFKA_CMD --create \
         --bootstrap-server $KAFKA_BOOTSTRAP_SERVERS \
         --topic air_quality_realtime \
         --partitions 3 \
-        --replication-factor 1 \
+        --replication-factor 3 \
         --if-not-exists
 fi
 

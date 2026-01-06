@@ -3,27 +3,42 @@ from pyspark.sql.functions import udf, from_json, col, when, current_timestamp, 
 from pyspark.sql.types import IntegerType, StructType, StructField, StringType, FloatType, LongType
 import os
 
-KAFKA_BOOTSTRAP_SERVERS = "localhost:9092"
-INPUT_TOPIC = "air_quality_realtime"
+# Cấu hình Kafka - hỗ trợ multiple brokers
+KAFKA_BOOTSTRAP_SERVERS = os.getenv(
+    "KAFKA_BOOTSTRAP_SERVERS",
+    "localhost:9092,localhost:9093,localhost:9094"
+)
+INPUT_TOPIC = os.getenv("KAFKA_TOPIC", "air_quality_realtime")
 
+# Cấu hình Cassandra - hỗ trợ multiple hosts
 SINK_MODE = os.getenv("SINK_MODE", "console")
-CASSANDRA_HOST = os.getenv("CASSANDRA_HOST", "localhost")
-CASSANDRA_PORT = os.getenv("CASSANDRA_PORT", "9042")
-CASSANDRA_KEYSPACE = "air_quality"
-CASSANDRA_TABLE = "realtime_data"
+CASSANDRA_HOSTS = os.getenv(
+    "CASSANDRA_HOSTS",
+    "localhost:9042,localhost:9043"
+)  # Danh sách hosts:port cách nhau bởi dấu phẩy
+CASSANDRA_KEYSPACE = os.getenv("CASSANDRA_KEYSPACE", "air_quality")
+CASSANDRA_TABLE = os.getenv("CASSANDRA_TABLE", "realtime_data")
 
 def create_spark_session():
     packages = "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0"
     if SINK_MODE == "cassandra":
         packages += ",com.datastax.spark:spark-cassandra-connector_2.12:3.2.0"
     
-    return SparkSession.builder \
+    spark_builder = SparkSession.builder \
         .appName("AirQuality_SparkStreaming") \
         .config("spark.jars.packages", packages) \
-        .config("spark.sql.shuffle.partitions", "2") \
-        .config("spark.cassandra.connection.host", CASSANDRA_HOST) \
-        .config("spark.cassandra.connection.port", CASSANDRA_PORT) \
-        .getOrCreate()
+        .config("spark.sql.shuffle.partitions", "2")
+    
+    # Cấu hình Cassandra với multiple hosts
+    if SINK_MODE == "cassandra":
+        # Parse danh sách hosts:port
+        hosts_list = [h.strip() for h in CASSANDRA_HOSTS.split(',')]
+        # Spark Cassandra connector hỗ trợ nhiều hosts bằng cách nối bằng dấu phẩy
+        cassandra_hosts = ','.join(hosts_list)
+        spark_builder = spark_builder.config("spark.cassandra.connection.host", cassandra_hosts)
+        print(f"Cassandra hosts configured: {cassandra_hosts}")
+    
+    return spark_builder.getOrCreate()
 
 def get_schema():
     return StructType([
@@ -121,11 +136,15 @@ def main():
     spark = create_spark_session()
     spark.sparkContext.setLogLevel("ERROR")
 
+    print(f"Connecting to Kafka brokers: {KAFKA_BOOTSTRAP_SERVERS}")
+    print(f"Subscribing to topic: {INPUT_TOPIC}")
+
     raw_df = spark.readStream \
         .format("kafka") \
         .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS) \
         .option("subscribe", INPUT_TOPIC) \
         .option("startingOffsets", "latest") \
+        .option("failOnDataLoss", "false") \
         .load()
 
     json_df = raw_df.selectExpr("CAST(value AS STRING) as json_string") \
