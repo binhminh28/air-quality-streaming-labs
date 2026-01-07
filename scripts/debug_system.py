@@ -1,554 +1,236 @@
 #!/usr/bin/env python3
 """
-Script debug toàn bộ hệ thống Air Quality Streaming
-Kiểm tra tất cả các component: Docker, Kafka, Spark, Cassandra, Dashboard
+Script debug nâng cao cho hệ thống Air Quality Streaming
+Update: Tự động phát hiện kiến trúc Hybrid (Docker + Local Process)
 """
 
 import subprocess
 import sys
 import os
 import time
+import requests
+import socket
 from datetime import datetime
 from cassandra.cluster import Cluster
-from cassandra.auth import PlainTextAuthProvider
-import json
 
-# Colors for output
+# Cấu hình màu sắc hiển thị
 class Colors:
     GREEN = '\033[92m'
     RED = '\033[91m'
     YELLOW = '\033[93m'
     BLUE = '\033[94m'
+    CYAN = '\033[96m'
     RESET = '\033[0m'
     BOLD = '\033[1m'
 
 def print_header(text):
-    print(f"\n{Colors.BOLD}{Colors.BLUE}{'='*60}{Colors.RESET}")
-    print(f"{Colors.BOLD}{Colors.BLUE}{text}{Colors.RESET}")
-    print(f"{Colors.BOLD}{Colors.BLUE}{'='*60}{Colors.RESET}\n")
+    print(f"\n{Colors.BOLD}{Colors.CYAN}{'='*60}{Colors.RESET}")
+    print(f"{Colors.BOLD}{Colors.CYAN}   {text}{Colors.RESET}")
+    print(f"{Colors.BOLD}{Colors.CYAN}{'='*60}{Colors.RESET}\n")
 
-def print_success(text):
-    print(f"{Colors.GREEN}✅ {text}{Colors.RESET}")
+def print_status(component, status, detail=""):
+    if status == "OK":
+        print(f"✅ {Colors.BOLD}{component:<25}{Colors.RESET} : {Colors.GREEN}RUNNING{Colors.RESET} {detail}")
+    elif status == "WARNING":
+        print(f"⚠️  {Colors.BOLD}{component:<25}{Colors.RESET} : {Colors.YELLOW}WARNING{Colors.RESET} {detail}")
+    else:
+        print(f"❌ {Colors.BOLD}{component:<25}{Colors.RESET} : {Colors.RED}FAILED{Colors.RESET}  {detail}")
 
-def print_error(text):
-    print(f"{Colors.RED}❌ {text}{Colors.RESET}")
+def check_port(host, port):
+    try:
+        with socket.create_connection((host, port), timeout=2):
+            return True
+    except (socket.timeout, ConnectionRefusedError):
+        return False
 
-def print_warning(text):
-    print(f"{Colors.YELLOW}⚠️  {text}{Colors.RESET}")
-
-def print_info(text):
-    print(f"{Colors.BLUE}ℹ️  {text}{Colors.RESET}")
-
-def check_docker_services():
-    """Kiểm tra các Docker services"""
-    print_header("1. KIỂM TRA DOCKER SERVICES")
+def tail_log(filename, lines=10):
+    """Đọc n dòng cuối của file log"""
+    log_path = os.path.join("logs", filename)
+    if not os.path.exists(log_path):
+        return "Log file not found."
     
     try:
-        result = subprocess.run(
-            ['docker', 'ps', '--format', '{{.Names}}\t{{.Status}}'],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        
-        services = {
-            'zookeeper': False,
-            'kafka': False,
-            'cassandra': False
-        }
-        
-        for line in result.stdout.strip().split('\n'):
-            if line:
-                name, status = line.split('\t')
-                if 'zookeeper' in name.lower():
-                    services['zookeeper'] = True
-                    print_success(f"Zookeeper: {name} - {status}")
-                elif 'kafka' in name.lower():
-                    services['kafka'] = True
-                    print_success(f"Kafka: {name} - {status}")
-                elif 'cassandra' in name.lower():
-                    services['cassandra'] = True
-                    print_success(f"Cassandra: {name} - {status}")
-        
-        for service, running in services.items():
-            if not running:
-                print_error(f"{service.capitalize()} không đang chạy!")
-        
-        return all(services.values())
-    except subprocess.CalledProcessError as e:
-        print_error(f"Lỗi khi kiểm tra Docker: {e}")
-        return False
-    except FileNotFoundError:
-        print_error("Docker không được cài đặt hoặc không có trong PATH")
-        return False
+        # Sử dụng tail command cho hiệu quả
+        result = subprocess.run(['tail', '-n', str(lines), log_path], capture_output=True, text=True)
+        return result.stdout.strip()
+    except Exception:
+        return "Could not read logs."
 
-def check_kafka_topic():
-    """Kiểm tra Kafka topic và messages"""
-    print_header("2. KIỂM TRA KAFKA TOPIC")
+# --- 1. INFRASTRUCTURE LAYER (DOCKER) ---
+def check_docker_infrastructure():
+    print_header("1. INFRASTRUCTURE LAYER (DOCKER)")
     
-    try:
-        # Kiểm tra topic tồn tại
-        result = subprocess.run(
-            ['docker', 'exec', 'kafka', 'kafka-topics', '--list', '--bootstrap-server', 'localhost:29092'],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        
-        topics = result.stdout.strip().split('\n')
-        if 'air_quality_realtime' in topics:
-            print_success(f"Topic 'air_quality_realtime' tồn tại")
-        else:
-            print_error("Topic 'air_quality_realtime' không tồn tại!")
-            return False
-        
-        # Kiểm tra số lượng messages trong topic
-        result = subprocess.run(
-            ['docker', 'exec', 'kafka', 'kafka-run-class', 'kafka.tools.GetOffsetShell',
-             '--broker-list', 'localhost:29092',
-             '--topic', 'air_quality_realtime'],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        
-        if result.stdout:
-            offsets = result.stdout.strip().split('\n')
-            total_messages = 0
-            for offset_line in offsets:
-                if ':' in offset_line:
-                    parts = offset_line.split(':')
-                    if len(parts) >= 3:
-                        total_messages += int(parts[2])
-            print_info(f"Tổng số messages trong topic: {total_messages}")
-            
-            # Lấy message mới nhất
-            result = subprocess.run(
-                ['docker', 'exec', 'kafka', 'kafka-console-consumer',
-                 '--bootstrap-server', 'localhost:29092',
-                 '--topic', 'air_quality_realtime',
-                 '--from-beginning',
-                 '--max-messages', '1',
-                 '--timeout-ms', '5000'],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            
-            if result.stdout:
-                print_success(f"Message mới nhất: {result.stdout.strip()[:100]}")
-            else:
-                print_warning("Không có message nào trong topic")
-        else:
-            print_warning("Không thể lấy thông tin về messages")
-        
-        return True
-    except subprocess.CalledProcessError as e:
-        print_error(f"Lỗi khi kiểm tra Kafka: {e}")
-        print_error(f"Output: {e.stderr}")
-        return False
-    except subprocess.TimeoutExpired:
-        print_warning("Timeout khi lấy message mới nhất")
-        return True
-    except Exception as e:
-        print_error(f"Lỗi không mong đợi: {e}")
-        return False
-
-def check_kafka_producer():
-    """Kiểm tra Kafka Producer có đang chạy không"""
-    print_header("3. KIỂM TRA KAFKA PRODUCER")
-    
-    try:
-        result = subprocess.run(
-            ['ps', 'aux'],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        
-        producer_running = False
-        for line in result.stdout.split('\n'):
-            if 'producer.py' in line and 'python' in line.lower():
-                producer_running = True
-                parts = line.split()
-                pid = parts[1]
-                print_success(f"Producer đang chạy (PID: {pid})")
-                print_info(f"Command: {' '.join(parts[10:])}")
-                break
-        
-        if not producer_running:
-            print_error("Producer KHÔNG đang chạy!")
-            print_info("Chạy: python kafka/producer.py")
-        
-        return producer_running
-    except Exception as e:
-        print_error(f"Lỗi khi kiểm tra Producer: {e}")
-        return False
-
-def check_spark_streaming():
-    """Kiểm tra Spark Streaming Job"""
-    print_header("4. KIỂM TRA SPARK STREAMING JOB")
-    
-    try:
-        result = subprocess.run(
-            ['ps', 'aux'],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        
-        spark_running = False
-        for line in result.stdout.split('\n'):
-            if 'streaming_job.py' in line and ('spark-submit' in line or 'python' in line.lower()):
-                spark_running = True
-                parts = line.split()
-                pid = parts[1]
-                print_success(f"Spark Streaming Job đang chạy (PID: {pid})")
-                print_info(f"Command: {' '.join(parts[10:])}")
-                break
-        
-        if not spark_running:
-            print_error("Spark Streaming Job KHÔNG đang chạy!")
-            print_info("Chạy: bash run_spark_cassandra.sh")
-        
-        return spark_running
-    except Exception as e:
-        print_error(f"Lỗi khi kiểm tra Spark: {e}")
-        return False
-
-def check_cassandra_connection():
-    """Kiểm tra kết nối Cassandra"""
-    print_header("5. KIỂM TRA CASSANDRA CONNECTION")
-    
-    try:
-        cluster = Cluster(['localhost'], port=9042)
-        session = cluster.connect()
-        print_success("Kết nối Cassandra thành công")
-        
-        # Kiểm tra keyspace
-        result = session.execute("SELECT keyspace_name FROM system_schema.keyspaces WHERE keyspace_name = 'air_quality'")
-        if result.one():
-            print_success("Keyspace 'air_quality' tồn tại")
-        else:
-            print_error("Keyspace 'air_quality' KHÔNG tồn tại!")
-            cluster.shutdown()
-            return False
-        
-        # Kiểm tra table
-        session.set_keyspace('air_quality')
-        result = session.execute("SELECT table_name FROM system_schema.tables WHERE keyspace_name = 'air_quality' AND table_name = 'realtime_data'")
-        if result.one():
-            print_success("Table 'realtime_data' tồn tại")
-        else:
-            print_error("Table 'realtime_data' KHÔNG tồn tại!")
-            cluster.shutdown()
-            return False
-        
-        cluster.shutdown()
-        return True
-    except Exception as e:
-        print_error(f"Lỗi kết nối Cassandra: {e}")
-        return False
-
-def check_cassandra_data():
-    """Kiểm tra dữ liệu trong Cassandra"""
-    print_header("6. KIỂM TRA DỮ LIỆU TRONG CASSANDRA")
-    
-    try:
-        cluster = Cluster(['localhost'], port=9042)
-        session = cluster.connect('air_quality')
-        
-        # Đếm tổng số records
-        result = session.execute("SELECT COUNT(*) FROM realtime_data")
-        total_count = result.one()[0]
-        print_info(f"Tổng số records: {total_count}")
-        
-        if total_count == 0:
-            print_warning("KHÔNG có dữ liệu trong Cassandra!")
-            cluster.shutdown()
-            return False
-        
-        # Lấy 5 records mới nhất
-        result = session.execute("""
-            SELECT datetime, pm25, aqi, quality, processed_at 
-            FROM realtime_data 
-            LIMIT 5
-        """)
-        
-        print_info("\n5 records mới nhất:")
-        records = list(result)
-        for i, row in enumerate(records, 1):
-            print(f"  {i}. datetime={row.datetime}, pm25={row.pm25:.2f}, aqi={row.aqi}, quality={row.quality}, processed_at={row.processed_at}")
-        
-        # Lấy record mới nhất và cũ nhất (Cassandra không hỗ trợ ORDER BY trên non-primary key)
-        # Sẽ sort trong Python
-        result = session.execute("""
-            SELECT datetime, pm25, aqi, quality, processed_at 
-            FROM realtime_data 
-            LIMIT 1000
-        """)
-        
-        all_records = list(result)
-        if all_records:
-            # Sort theo datetime trong Python
-            all_records.sort(key=lambda x: x.datetime, reverse=True)
-            latest = all_records[0]
-            print_info(f"\nRecord mới nhất:")
-            print(f"  datetime: {latest.datetime}")
-            print(f"  pm25: {latest.pm25:.2f}")
-            print(f"  aqi: {latest.aqi}")
-            print(f"  quality: {latest.quality}")
-            print(f"  processed_at: {latest.processed_at}")
-            
-            all_records.sort(key=lambda x: x.datetime, reverse=False)
-            oldest = all_records[0]
-            print_info(f"\nRecord cũ nhất:")
-            print(f"  datetime: {oldest.datetime}")
-            print(f"  pm25: {oldest.pm25:.2f}")
-            print(f"  aqi: {oldest.aqi}")
-            print(f"  quality: {oldest.quality}")
-            print(f"  processed_at: {oldest.processed_at}")
-        
-        # Kiểm tra dữ liệu có được cập nhật gần đây không (trong 1 phút qua)
-        current_time = datetime.now()
-        if latest and latest.processed_at:
-            time_diff = (current_time - latest.processed_at.replace(tzinfo=None)).total_seconds()
-            if time_diff < 60:
-                print_success(f"Dữ liệu được cập nhật {time_diff:.0f} giây trước (realtime)")
-            else:
-                print_warning(f"Dữ liệu được cập nhật {time_diff:.0f} giây trước (KHÔNG realtime - quá cũ)")
-        
-        cluster.shutdown()
-        return True
-    except Exception as e:
-        print_error(f"Lỗi khi kiểm tra dữ liệu Cassandra: {e}")
-        import traceback
-        print_error(f"Traceback: {traceback.format_exc()}")
-        return False
-
-def check_dashboard_connection():
-    """Kiểm tra kết nối từ Dashboard đến Cassandra"""
-    print_header("7. KIỂM TRA DASHBOARD CONNECTION")
-    
-    try:
-        # Simulate dashboard connection
-        cluster = Cluster(['localhost'], port=9042)
-        session = cluster.connect()
-        session.set_keyspace('air_quality')
-        
-        # Query giống như dashboard
-        query = """
-        SELECT datetime, pm25, aqi, quality, processed_at 
-        FROM realtime_data
-        LIMIT 1000
-        """
-        rows = session.execute(query)
-        
-        data = []
-        for row in rows:
-            data.append({
-                'datetime': row.datetime,
-                'pm25': row.pm25,
-                'aqi': row.aqi,
-                'quality': row.quality,
-                'processed_at': row.processed_at
-            })
-        
-        print_success(f"Dashboard có thể đọc được {len(data)} records")
-        
-        if len(data) > 0:
-            # Convert datetime
-            import pandas as pd
-            df = pd.DataFrame(data)
-            df['datetime'] = pd.to_datetime(df['datetime'])
-            df = df.sort_values('datetime', ascending=False)
-            
-            latest = df.iloc[0]
-            print_info(f"\nRecord mới nhất mà Dashboard sẽ hiển thị:")
-            print(f"  datetime: {latest['datetime']}")
-            print(f"  pm25: {latest['pm25']:.2f}")
-            print(f"  aqi: {latest['aqi']}")
-            print(f"  quality: {latest['quality']}")
-        
-        cluster.shutdown()
-        return True
-    except Exception as e:
-        print_error(f"Lỗi khi kiểm tra Dashboard connection: {e}")
-        import traceback
-        print_error(f"Traceback: {traceback.format_exc()}")
-        return False
-
-def check_streamlit():
-    """Kiểm tra Streamlit có đang chạy không"""
-    print_header("8. KIỂM TRA STREAMLIT DASHBOARD")
-    
-    try:
-        result = subprocess.run(
-            ['ps', 'aux'],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        
-        streamlit_running = False
-        for line in result.stdout.split('\n'):
-            if 'streamlit' in line.lower() and 'streamlit_app.py' in line:
-                streamlit_running = True
-                parts = line.split()
-                pid = parts[1]
-                print_success(f"Streamlit Dashboard đang chạy (PID: {pid})")
-                print_info(f"Command: {' '.join(parts[10:])}")
-                break
-        
-        if not streamlit_running:
-            print_warning("Streamlit Dashboard KHÔNG đang chạy!")
-            print_info("Chạy: streamlit run dashboard/streamlit_app.py")
-        
-        return streamlit_running
-    except Exception as e:
-        print_error(f"Lỗi khi kiểm tra Streamlit: {e}")
-        return False
-
-def monitor_data_updates():
-    """Monitor dữ liệu có được cập nhật không trong 30 giây"""
-    print_header("9. MONITOR DỮ LIỆU CẬP NHẬT (30 giây)")
-    
-    try:
-        cluster = Cluster(['localhost'], port=9042)
-        session = cluster.connect('air_quality')
-        
-        # Lấy số lượng records ban đầu
-        result = session.execute("SELECT COUNT(*) FROM realtime_data")
-        initial_count = result.one()[0]
-        print_info(f"Số lượng records ban đầu: {initial_count}")
-        
-        # Lấy record mới nhất ban đầu
-        result = session.execute("""
-            SELECT datetime, processed_at 
-            FROM realtime_data 
-            ORDER BY datetime DESC 
-            LIMIT 1
-        """)
-        initial_latest = result.one()
-        if initial_latest:
-            print_info(f"Record mới nhất ban đầu: {initial_latest.datetime}, processed_at: {initial_latest.processed_at}")
-        
-        print_info("Đang monitor trong 30 giây...")
-        time.sleep(30)
-        
-        # Kiểm tra lại
-        result = session.execute("SELECT COUNT(*) FROM realtime_data")
-        final_count = result.one()[0]
-        print_info(f"Số lượng records sau 30 giây: {final_count}")
-        
-        result = session.execute("""
-            SELECT datetime, processed_at 
-            FROM realtime_data 
-            ORDER BY datetime DESC 
-            LIMIT 1
-        """)
-        final_latest = result.one()
-        if final_latest:
-            print_info(f"Record mới nhất sau 30 giây: {final_latest.datetime}, processed_at: {final_latest.processed_at}")
-        
-        # So sánh
-        if final_count > initial_count:
-            print_success(f"Có {final_count - initial_count} records mới được thêm vào!")
-        elif final_latest and initial_latest and final_latest.datetime != initial_latest.datetime:
-            print_success("Có dữ liệu mới được cập nhật!")
-        else:
-            print_warning("KHÔNG có dữ liệu mới được thêm vào trong 30 giây!")
-            print_warning("Có thể Producer hoặc Spark Streaming không hoạt động đúng!")
-        
-        cluster.shutdown()
-        return True
-    except Exception as e:
-        print_error(f"Lỗi khi monitor: {e}")
-        import traceback
-        print_error(f"Traceback: {traceback.format_exc()}")
-        return False
-
-def generate_report():
-    """Tạo báo cáo tổng hợp"""
-    print_header("📊 BÁO CÁO TỔNG HỢP")
-    
-    results = {
-        'docker': check_docker_services(),
-        'kafka_topic': check_kafka_topic(),
-        'kafka_producer': check_kafka_producer(),
-        'spark_streaming': check_spark_streaming(),
-        'cassandra_connection': check_cassandra_connection(),
-        'cassandra_data': check_cassandra_data(),
-        'dashboard_connection': check_dashboard_connection(),
-        'streamlit': check_streamlit(),
+    expected_containers = {
+        'kafka': 3,      # kafka-1, kafka-2, kafka-3
+        'zookeeper': 1,
+        'cassandra': 2   # cassandra-1, cassandra-2
     }
     
-    print("\n" + "="*60)
-    print("KẾT QUẢ KIỂM TRA:")
-    print("="*60)
-    
-    for component, status in results.items():
-        if status:
-            print_success(f"{component}: OK")
+    try:
+        result = subprocess.run(['docker', 'ps', '--format', '{{.Names}}'], capture_output=True, text=True)
+        running_containers = result.stdout.strip().split('\n')
+        
+        counts = {'kafka': 0, 'zookeeper': 0, 'cassandra': 0}
+        
+        for name in running_containers:
+            for key in counts:
+                if key in name:
+                    counts[key] += 1
+
+        all_ok = True
+        for service, count in counts.items():
+            expected = expected_containers[service]
+            if count >= expected:
+                print_status(f"Docker: {service.capitalize()}", "OK", f"({count}/{expected} nodes)")
+            elif count > 0:
+                print_status(f"Docker: {service.capitalize()}", "WARNING", f"({count}/{expected} nodes - Degraded)")
+            else:
+                print_status(f"Docker: {service.capitalize()}", "ERROR", "(Not Running)")
+                all_ok = False
+        
+        return all_ok
+    except Exception as e:
+        print_status("Docker Daemon", "ERROR", str(e))
+        return False
+
+# --- 2. APPLICATION LAYER (LOCAL PROCESSES) ---
+def check_process(process_name, log_file=None):
+    """Kiểm tra process đang chạy bằng lệnh ps"""
+    try:
+        # Grep process, loại bỏ chính lệnh grep và script hiện tại
+        cmd = f"ps aux | grep '{process_name}' | grep -v grep | grep -v debug_system.py"
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        
+        if result.stdout.strip():
+            pid = result.stdout.split()[1]
+            print_status(f"Process: {process_name.split('/')[-1]}", "OK", f"(PID: {pid})")
+            return True
         else:
-            print_error(f"{component}: FAILED")
+            print_status(f"Process: {process_name.split('/')[-1]}", "ERROR", "Stopped")
+            if log_file:
+                print(f"{Colors.YELLOW}   >>> Last 5 log lines for {process_name}:{Colors.RESET}")
+                print(f"{Colors.YELLOW}{tail_log(log_file, 5)}{Colors.RESET}\n")
+            return False
+    except Exception as e:
+        print(f"Error checking process: {e}")
+        return False
+
+def check_application_layer():
+    print_header("2. APPLICATION LAYER (LOCAL PROCESSES)")
     
-    all_ok = all(results.values())
+    status = {}
     
-    if all_ok:
-        print_success("\n✅ TẤT CẢ COMPONENTS ĐANG HOẠT ĐỘNG!")
-    else:
-        print_error("\n❌ MỘT SỐ COMPONENTS CÓ VẤN ĐỀ!")
-        print_info("\nCác bước khắc phục:")
-        if not results['docker']:
-            print_info("  1. Khởi động Docker services: cd docker && docker-compose up -d")
-        if not results['kafka_topic']:
-            print_info("  2. Tạo Kafka topic: bash scripts/create_topics.sh")
-        if not results['kafka_producer']:
-            print_info("  3. Chạy Producer: python kafka/producer.py")
-        if not results['spark_streaming']:
-            print_info("  4. Chạy Spark Streaming: bash run_spark_cassandra.sh")
-        if not results['cassandra_connection'] or not results['cassandra_data']:
-            print_info("  5. Khởi tạo Cassandra schema: docker exec -it cassandra cqlsh -f /scripts/init_cassandra.cql")
-        if not results['streamlit']:
-            print_info("  6. Chạy Dashboard: streamlit run dashboard/streamlit_app.py")
+    # 1. Producer
+    status['producer'] = check_process("kafka/producer.py", "producer.log")
     
-    return results
+    # 2. Spark Streaming
+    status['spark'] = check_process("spark/streaming_job.py", "spark_streaming.log")
+    if status['spark']:
+        # Kiểm tra Spark UI port
+        if check_port('localhost', 4040):
+            print(f"   ℹ️  Spark UI accessible at: {Colors.BLUE}http://localhost:4040{Colors.RESET}")
+        else:
+            print(f"   ⚠️  Spark UI (port 4040) not accessible yet (Job starting?)")
+
+    # 3. WebSocket Server
+    status['websocket'] = check_process("dashboard/websocket_server.py", "websocket_server.log")
+    if status['websocket']:
+        try:
+            r = requests.get("http://localhost:8765/health", timeout=2)
+            if r.status_code == 200:
+                print(f"   ✅ API Health Check: {Colors.GREEN}OK{Colors.RESET} (http://localhost:8765)")
+            else:
+                print(f"   ❌ API Health Check: {Colors.RED}Failed{Colors.RESET} (Status: {r.status_code})")
+        except:
+            print(f"   ❌ API Health Check: {Colors.RED}Connection Refused{Colors.RESET}")
+
+    # 4. Streamlit Dashboard
+    status['streamlit'] = check_process("streamlit_app.py") # Tên có thể chỉ là streamlit
+    
+    return all(status.values())
+
+# --- 3. DATA FLOW & LATENCY ---
+def check_data_pipeline():
+    print_header("3. DATA PIPELINE & LATENCY CHECK")
+    
+    try:
+        # Connect to Cassandra
+        cluster = Cluster(['localhost'], port=9042)
+        session = cluster.connect()
+        
+        # Check Keyspace
+        row = session.execute("SELECT keyspace_name FROM system_schema.keyspaces WHERE keyspace_name = 'air_quality'").one()
+        if not row:
+            print_status("Cassandra Schema", "ERROR", "Keyspace 'air_quality' not found")
+            return
+            
+        session.set_keyspace('air_quality')
+        
+        # Check Data Count
+        count = session.execute("SELECT COUNT(*) FROM realtime_data").one()[0]
+        
+        if count == 0:
+            print_status("Data Storage", "WARNING", "Table exists but NO DATA found.")
+            print(f"   ℹ️  Check: Is Producer running? Is Spark Job actually writing?")
+            return
+
+        # Check Latency (Freshness)
+        # Lấy record có processed_at mới nhất (cần allow filtering hoặc index, ở đây lấy mẫu limit)
+        # Vì Cassandra khó sort global, ta lấy 100 record mới nhất theo datetime
+        rows = session.execute("SELECT datetime, processed_at FROM realtime_data LIMIT 100")
+        latest_record = None
+        
+        # Sort in Python
+        data_list = list(rows)
+        if data_list:
+            data_list.sort(key=lambda x: x.datetime, reverse=True)
+            latest_record = data_list[0]
+        
+        if latest_record:
+            # Parse datetime
+            try:
+                # Định dạng trong code producer: isoformat()
+                data_time = datetime.fromisoformat(latest_record.datetime)
+                now = datetime.now(data_time.tzinfo)
+                
+                latency = (now - data_time).total_seconds()
+                
+                msg = f"{count} records total. Latest: {latency:.1f}s ago"
+                
+                if latency < 30:
+                    print_status("Data Freshness", "OK", msg)
+                elif latency < 120:
+                    print_status("Data Freshness", "WARNING", msg)
+                else:
+                    print_status("Data Freshness", "ERROR", f"{msg} (Stale Data)")
+            except Exception as e:
+                print_status("Data Freshness", "WARNING", f"Found data but error parsing time: {e}")
+        
+        cluster.shutdown()
+        
+    except Exception as e:
+        print_status("Cassandra Connection", "ERROR", str(e))
 
 def main():
-    """Main function"""
-    print(f"\n{Colors.BOLD}{Colors.BLUE}")
-    print("="*60)
-    print("  AIR QUALITY STREAMING SYSTEM - DEBUG TOOL")
-    print("="*60)
-    print(f"{Colors.RESET}\n")
+    print(f"\n🚀 {Colors.BOLD}AIR QUALITY SYSTEM DIAGNOSTIC TOOL{Colors.RESET}")
+    print(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
-    print_info(f"Thời gian chạy: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    # 1. Check Infrastructure
+    check_docker_infrastructure()
     
-    # Chạy các kiểm tra
-    results = generate_report()
+    # 2. Check Apps
+    check_application_layer()
     
-    # Hỏi có muốn monitor không
+    # 3. Check Data
+    check_data_pipeline()
+    
     print("\n" + "="*60)
-    response = input("Bạn có muốn monitor dữ liệu cập nhật trong 30 giây? (y/n): ")
-    if response.lower() == 'y':
-        monitor_data_updates()
-    
-    print(f"\n{Colors.BOLD}{Colors.BLUE}")
-    print("="*60)
-    print("  DEBUG HOÀN TẤT")
-    print("="*60)
-    print(f"{Colors.RESET}\n")
+    print(f"{Colors.BOLD}💡 TROUBLESHOOTING TIPS:{Colors.RESET}")
+    print("1. Nếu Spark chết: Kiểm tra logs/spark_streaming.log")
+    print("2. Nếu Producer chết: Kiểm tra logs/producer.log")
+    print("3. Để khởi động lại toàn bộ: bash stop_all.sh && bash start_all.sh")
+    print("4. Dashboard: http://localhost:8501")
+    print("="*60 + "\n")
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\n\nĐã dừng debug tool.")
-        sys.exit(0)
-    except Exception as e:
-        print_error(f"Lỗi không mong đợi: {e}")
-        import traceback
-        print_error(traceback.format_exc())
-        sys.exit(1)
-
+    main()
