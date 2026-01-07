@@ -252,6 +252,16 @@ air-quality-streaming-labs/
 │   └── poetry.lock                 # File khóa phiên bản thư viện để đảm bảo đồng bộ môi trường
 
 ```
+---
+
+##7. Hình ảnh dự án
+
+<img width="2247" height="857" alt="image" src="https://github.com/user-attachments/assets/4a33863e-4452-4d04-a42f-59e4d642b183" />
+
+<img width="2198" height="1122" alt="image" src="https://github.com/user-attachments/assets/0ebd3725-5516-4568-87f5-196a09364cde" />
+
+
+---
 
 ### Giải thích chi tiết các thành phần chính:
 
