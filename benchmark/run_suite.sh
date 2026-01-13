@@ -8,31 +8,48 @@ fi
 
 MODE=$1
 LIMIT=2000
+if [ "$MODE" == "stress" ]; then LIMIT=10000; fi # Tăng limit để test lâu hơn
 OUTPUT_CSV="benchmark/results_${MODE}.csv"
+RESOURCE_LOG="benchmark/resources_${MODE}.log"
 
 echo "=== BENCHMARK SUITE: $MODE ==="
 
-# Cleanup old processes
+# 0. Clean & Prepare
+echo "🧹 Cleaning up old processes..."
 pkill -f producer_tool.py
+pkill -f docker stats
 sleep 2
 
-# 1. Run Producer
-echo "▶️ Running Producer ($MODE)..."
-if [ "$MODE" == "stress" ]; then LIMIT=5000; fi
+echo "🧹 Truncating Cassandra table (Ensure fresh data)..."
+# Lệnh này xóa sạch bảng realtime_data để đảm bảo tính toán đúng
+docker exec cassandra cqlsh -e "TRUNCATE air_quality.realtime_data;"
 
-# Dùng 'poetry run python' thay vì 'python3'
+# 1. Start Resource Monitoring (NEW)
+echo "📈 Starting Resource Monitor..."
+# Ghi log CPU/RAM mỗi giây vào file
+docker stats --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}" > $RESOURCE_LOG &
+MONITOR_PID=$!
+
+# 2. Run Producer
+echo "▶️ Running Producer ($MODE)..."
 poetry run python benchmark/producer_tool.py $MODE --limit $LIMIT &
 PRODUCER_PID=$!
 
+# Chờ Producer chạy xong
 wait $PRODUCER_PID
 echo "✅ Producer finished."
 
-# 2. Wait for processing
-echo "⏳ Waiting 10s for Spark to finish..."
-sleep 10
+# 3. Wait for Spark to drain the queue (Lag handling)
+echo "⏳ Waiting for Spark to finish processing..."
+# Thay vì sleep cứng 10s, ta có thể sleep lâu hơn tùy mode
+sleep 20 
 
-# 3. Analyze
+# Stop monitor
+kill $MONITOR_PID
+
+# 4. Analyze
 echo "▶️ Analyzing Results..."
 poetry run python benchmark/analyzer_tool.py --limit $LIMIT --output $OUTPUT_CSV
 
-echo "=== DONE. Results: $OUTPUT_CSV ==="
+echo "=== DONE. Results saved to $OUTPUT_CSV ==="
+echo "=== Resource logs saved to $RESOURCE_LOG ==="
