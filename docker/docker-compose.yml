@@ -13,6 +13,8 @@ services:
       resources:
         limits:
           memory: 512M
+    networks:
+      - app-network
 
   kafka-1:
     image: confluentinc/cp-kafka:7.4.0   
@@ -36,6 +38,8 @@ services:
         limits:
           memory: 512M
     restart: always
+    networks:
+      - app-network
 
   kafka-2:
     image: confluentinc/cp-kafka:7.4.0   
@@ -59,6 +63,8 @@ services:
         limits:
           memory: 512M
     restart: always
+    networks:
+      - app-network
 
   kafka-3:
     image: confluentinc/cp-kafka:7.4.0   
@@ -82,6 +88,8 @@ services:
         limits:
           memory: 512M
     restart: always
+    networks:
+      - app-network
 
   cassandra-1:
     image: cassandra:4.1
@@ -107,6 +115,8 @@ services:
         limits:
           memory: 1G
     restart: always
+    networks:
+      - app-network
 
   cassandra-2:
     image: cassandra:4.1
@@ -132,6 +142,25 @@ services:
         limits:
           memory: 1G
     restart: always
+    networks:
+      - app-network
+
+  redis:
+    image: redis:alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    restart: always
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
 
 volumes:
   cassandra_data_1:

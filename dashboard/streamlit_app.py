@@ -155,12 +155,34 @@ def create_gauge_chart(value, title="AQI Index"):
 
 def create_donut_chart(pm25, pm10):
     """Biểu đồ tỷ lệ PM2.5 trong PM10"""
-    if pd.isna(pm10) or pm10 == 0: return None
+    # Handle None values
+    if pm25 is None:
+        pm25 = 0.0
+    if pm10 is None:
+        pm10 = 0.0
     
-    other_pm = max(0, pm10 - pm25)
+    # Convert to float and handle NaN
+    try:
+        pm25 = float(pm25) if not pd.isna(pm25) else 0.0
+        pm10 = float(pm10) if not pd.isna(pm10) else 0.0
+    except (ValueError, TypeError):
+        pm25 = 0.0
+        pm10 = 0.0
+    
+    # Return None if pm10 is 0 or invalid
+    if pm10 == 0 or pm10 is None:
+        return None
+    
+    other_pm = max(0.0, pm10 - pm25)
     labels = ['PM2.5 (Bụi mịn)', 'PM thô khác']
     values = [pm25, other_pm]
     colors = ['#ff7f0e', '#e0e0e0']
+    
+    # Calculate percentage safely
+    try:
+        percentage = int((pm25 / pm10) * 100) if pm10 > 0 else 0
+    except (ZeroDivisionError, TypeError):
+        percentage = 0
     
     fig = go.Figure(data=[go.Pie(labels=labels, values=values, hole=.7, marker_colors=colors)])
     fig.update_layout(
@@ -168,7 +190,7 @@ def create_donut_chart(pm25, pm10):
         showlegend=True,
         height=300,
         margin=dict(l=20, r=20, t=50, b=20),
-        annotations=[dict(text=f'{int((pm25/pm10)*100)}%', x=0.5, y=0.5, font_size=20, showarrow=False)]
+        annotations=[dict(text=f'{percentage}%', x=0.5, y=0.5, font_size=20, showarrow=False)]
     )
     return fig
 
@@ -230,10 +252,31 @@ def main():
 
     latest = df.iloc[0]
     
+    # --- ALERT SECTION ---
+    # Hiển thị cảnh báo nếu AQI > 150
+    aqi_val = latest.get('aqi', 0)
+    if pd.notna(aqi_val) and float(aqi_val) > 150:
+        location_id = latest.get('location_id', 'N/A')
+        quality = latest.get('quality', 'N/A')
+        
+        if float(aqi_val) > 200:
+            st.error(f"🚨 **CẢNH BÁO NGUY HẠI**: Trạm {location_id} có AQI = **{int(aqi_val)}** ({quality}). Mức độ ô nhiễm rất cao!")
+        elif float(aqi_val) > 150:
+            st.warning(f"⚠️ **CẢNH BÁO**: Trạm {location_id} có AQI = **{int(aqi_val)}** ({quality}). Chất lượng không khí kém!")
+    
     # --- HEADER INFO ---
     col_info1, col_info2 = st.columns([3, 1])
     with col_info1:
-        last_update = latest['datetime'].strftime('%H:%M:%S %d/%m/%Y')
+        try:
+            if 'datetime' in latest and pd.notna(latest['datetime']):
+                if isinstance(latest['datetime'], pd.Timestamp):
+                    last_update = latest['datetime'].strftime('%H:%M:%S %d/%m/%Y')
+                else:
+                    last_update = str(latest['datetime'])
+            else:
+                last_update = 'N/A'
+        except Exception:
+            last_update = 'N/A'
         st.info(f"📅 Cập nhật lần cuối: **{last_update}** | Tổng số bản ghi: **{len(df)}**")
     
     # --- HEADLINE SECTION (KPIs) ---
@@ -244,7 +287,7 @@ def main():
     
     with col_kpi1:
         # Biểu đồ Gauge cho AQI
-        aqi_val = latest.get('aqi', 0)
+        aqi_val = latest.get('aqi', 0) if pd.notna(latest.get('aqi')) else 0
         st.plotly_chart(create_gauge_chart(aqi_val), use_container_width=True)
         
         # Cảnh báo text
@@ -265,7 +308,11 @@ def main():
         st.metric("Nhiệt độ", f"{latest.get('temperature', 0):.1f} °C")
         st.metric("Độ ẩm", f"{latest.get('relativehumidity', 0):.1f} %")
         # Biểu đồ Donut tỷ lệ bụi
-        st.plotly_chart(create_donut_chart(latest.get('pm25', 0), latest.get('pm10', 0)), use_container_width=True)
+        donut_chart = create_donut_chart(latest.get('pm25', 0), latest.get('pm10', 0))
+        if donut_chart is not None:
+            st.plotly_chart(donut_chart, use_container_width=True)
+        else:
+            st.info("PM10 data not available for ratio chart")
 
     st.divider()
 

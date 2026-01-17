@@ -1,7 +1,9 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import udf, from_json, col, when, current_timestamp, greatest
+from pyspark.sql.functions import udf, from_json, col, when, current_timestamp, greatest, to_timestamp
 from pyspark.sql.types import IntegerType, StructType, StructField, StringType, FloatType, LongType
 import os
+import redis
+from datetime import datetime
 
 # Cấu hình Kafka - hỗ trợ multiple brokers
 KAFKA_BOOTSTRAP_SERVERS = os.getenv(
@@ -18,6 +20,10 @@ CASSANDRA_HOSTS = os.getenv(
 )  # Danh sách hosts:port cách nhau bởi dấu phẩy
 CASSANDRA_KEYSPACE = os.getenv("CASSANDRA_KEYSPACE", "air_quality")
 CASSANDRA_TABLE = os.getenv("CASSANDRA_TABLE", "realtime_data")
+
+# Cấu hình Redis
+REDIS_HOST = os.getenv("REDIS_HOST", "redis")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 
 def create_spark_session():
     packages = "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0"
@@ -153,14 +159,32 @@ def main():
 
     processed_df = apply_aqi_logic(json_df)
     
-    final_df = processed_df \
+    # Convert datetime string to timestamp for watermarking
+    processed_df_with_timestamp = processed_df.withColumn(
+        "datetime_ts", 
+        to_timestamp(col("datetime"), "yyyy-MM-dd HH:mm:ss")
+    )
+    
+    # Apply watermarking - 10 minutes delay tolerance
+    processed_df_with_watermark = processed_df_with_timestamp \
+        .withWatermark("datetime_ts", "10 minutes")
+    
+    final_df = processed_df_with_watermark \
         .withColumnRenamed("AQI", "aqi") \
         .withColumnRenamed("Quality", "quality") \
-        .withColumn("processed_at", current_timestamp())
+        .withColumn("processed_at", current_timestamp()) \
+        .drop("datetime_ts")  # Remove datetime_ts - only used for watermarking, not stored in Cassandra
 
     if SINK_MODE == "cassandra":
-        def write_to_cassandra_batch(df, epoch_id):
+        def write_to_cassandra_and_redis_batch(df, epoch_id):
+            """
+            Dual Sink: Write to both Cassandra (History) and Redis (Real-time Snapshot)
+            """
+            if df.isEmpty():
+                return
+            
             try:
+                # Task A: Write to Cassandra (History)
                 df.write \
                     .format("org.apache.spark.sql.cassandra") \
                     .mode("append") \
@@ -169,12 +193,73 @@ def main():
                         keyspace=CASSANDRA_KEYSPACE
                     ) \
                     .save()
+                print(f"✓ Batch {epoch_id}: Written to Cassandra")
             except Exception as e:
-                print(f"Error writing to Cassandra: {e}")
+                print(f"✗ Error writing to Cassandra: {e}")
+            
+            # Task B: Write to Redis (Real-time Snapshot)
+            try:
+                redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True, socket_connect_timeout=5)
+                
+                # Convert Spark DataFrame to list of rows (avoid pandas/distutils issue in Python 3.13)
+                selected_df = df.select(
+                    "location_id", "datetime", "aqi", "pm25", "quality"
+                )
+                
+                # Collect rows and process in Python
+                rows = selected_df.collect()
+                
+                if rows:
+                    # Group by location_id and find latest by datetime
+                    location_data = {}
+                    for row in rows:
+                        location_id = int(row.location_id) if row.location_id else 0
+                        datetime_str = str(row.datetime) if row.datetime else ""
+                        
+                        # Keep only the latest record per location
+                        if location_id not in location_data:
+                            location_data[location_id] = row
+                        else:
+                            # Compare datetime strings to find latest
+                            current_dt = str(location_data[location_id].datetime) if location_data[location_id].datetime else ""
+                            if datetime_str > current_dt:
+                                location_data[location_id] = row
+                    
+                    # Write each location's latest data to Redis as Hash
+                    for location_id, row in location_data.items():
+                        key = f"location:{location_id}"
+                        
+                        # Prepare hash mapping
+                        hash_data = {
+                            'aqi': str(int(row.aqi)) if row.aqi is not None else '0',
+                            'pm25': str(float(row.pm25)) if row.pm25 is not None else '0.0',
+                            'quality': str(row.quality) if row.quality else 'N/A',
+                            'timestamp': str(row.datetime) if row.datetime else ''
+                        }
+                        
+                        # Use hset for multiple fields (Redis 4.0+)
+                        redis_client.hset(key, mapping=hash_data)
+                        
+                        # Set expiration (optional, 1 hour TTL)
+                        redis_client.expire(key, 3600)
+                        
+                        # Alerting: Check if AQI > 200 (Nguy hại)
+                        aqi_value = int(row.aqi) if row.aqi is not None else 0
+                        if aqi_value > 200:
+                            print(f"🚨 ALERT: High Pollution at Location {location_id} | AQI: {aqi_value}")
+                    
+                    print(f"✓ Batch {epoch_id}: Updated Redis with {len(location_data)} locations")
+                
+                redis_client.close()
+                
+            except (redis.ConnectionError, redis.TimeoutError) as e:
+                print(f"⚠ Warning: Could not connect to Redis: {e}")
+            except Exception as e:
+                print(f"⚠ Warning: Error writing to Redis: {e}")
         
         query = final_df.writeStream \
             .outputMode("append") \
-            .foreachBatch(write_to_cassandra_batch) \
+            .foreachBatch(write_to_cassandra_and_redis_batch) \
             .option("checkpointLocation", "/tmp/spark_checkpoints_cassandra") \
             .start()
     else:

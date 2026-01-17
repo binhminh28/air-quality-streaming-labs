@@ -73,7 +73,17 @@ start_background() {
     # Change to project directory to ensure correct paths
     cd "$(dirname "$0")" || exit 1
     
-    nohup bash -c "source .venv/bin/activate 2>/dev/null; cd '$(pwd)'; $command" > "logs/${name}.log" 2>&1 &
+    # Use .venv/bin/python directly for more reliable execution
+    # Replace 'python' with full path to venv python if venv exists
+    if [ -f ".venv/bin/python" ]; then
+        # Replace 'python ' at the start of command with .venv/bin/python
+        venv_command=$(echo "$command" | sed 's|^python |.venv/bin/python |')
+        nohup bash -c "cd '$(pwd)'; $venv_command" > "logs/${name}.log" 2>&1 &
+    elif command -v poetry >/dev/null 2>&1; then
+        nohup bash -c "cd '$(pwd)'; poetry run $command" > "logs/${name}.log" 2>&1 &
+    else
+        nohup bash -c "source .venv/bin/activate 2>/dev/null; cd '$(pwd)'; $command" > "logs/${name}.log" 2>&1 &
+    fi
     local pid=$!
     echo $pid > "logs/${name}.pid"
     echo "   PID: $pid"
