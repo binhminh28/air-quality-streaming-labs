@@ -75,9 +75,13 @@ def setup_page():
 
 # --- DATA FETCHING ---
 @st.cache_data(ttl=1)
-def fetch_data_from_websocket(limit=1000):
+def fetch_realtime_data():
+    """
+    Lấy dữ liệu real-time từ Spark (qua Redis)
+    Dùng cho phần "🎯 Chỉ số hiện tại"
+    """
     try:
-        response = requests.get(f"{WEBSOCKET_SERVER_URL}?limit={limit}", timeout=5)
+        response = requests.get(f"{WEBSOCKET_SERVER_URL}?limit=100&type=realtime", timeout=5)
         if response.status_code == 200:
             result = response.json()
             data = result.get('data', [])
@@ -87,15 +91,54 @@ def fetch_data_from_websocket(limit=1000):
                     df['datetime'] = pd.to_datetime(df['datetime'], errors='coerce', utc=True)
                     df = df.dropna(subset=['datetime'])
                 if not df.empty:
-                    # Chuyển đổi sang giờ địa phương (Vietnam: UTC+7) nếu cần, ở đây giữ nguyên UTC hoặc xử lý hiển thị sau
                     df = df.sort_values('datetime', ascending=False).reset_index(drop=True)
                     return df
         return pd.DataFrame()
     except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
         return pd.DataFrame()
     except Exception as e:
-        st.error(f"Lỗi data: {str(e)}")
+        st.error(f"Lỗi khi lấy dữ liệu real-time: {str(e)}")
         return pd.DataFrame()
+
+@st.cache_data(ttl=5)
+def fetch_history_data(limit=1000):
+    """
+    Lấy dữ liệu lịch sử từ Cassandra
+    Dùng cho phần "📈 Xu hướng theo thời gian" và "📋 Xem dữ liệu chi tiết"
+    """
+    try:
+        response = requests.get(f"{WEBSOCKET_SERVER_URL}?limit={limit}&type=history", timeout=10)
+        if response.status_code == 200:
+            result = response.json()
+            data = result.get('data', [])
+            if data:
+                df = pd.DataFrame(data)
+                if 'datetime' in df.columns:
+                    df['datetime'] = pd.to_datetime(df['datetime'], errors='coerce', utc=True)
+                    df = df.dropna(subset=['datetime'])
+                if not df.empty:
+                    df = df.sort_values('datetime', ascending=False).reset_index(drop=True)
+                    return df
+        return pd.DataFrame()
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Lỗi khi lấy dữ liệu lịch sử: {str(e)}")
+        return pd.DataFrame()
+
+def safe_get_value(series, key, default=0.0):
+    """
+    An toàn lấy giá trị từ pandas Series với xử lý None/NaN
+    """
+    try:
+        if key not in series.index:
+            return default
+        value = series[key]
+        if pd.isna(value) or value is None:
+            return default
+        return float(value)
+    except (ValueError, TypeError, KeyError):
+        return default
 
 # --- UTILS ---
 def get_aqi_color(aqi):
@@ -235,40 +278,52 @@ def main():
         st.divider()
         col1, col2 = st.columns(2)
         if col1.button("Làm mới", use_container_width=True):
-            fetch_data_from_websocket.clear()
+            fetch_realtime_data.clear()
+            fetch_history_data.clear()
             st.rerun()
         if col2.button("Xóa Cache", use_container_width=True):
-            fetch_data_from_websocket.clear()
+            fetch_realtime_data.clear()
+            fetch_history_data.clear()
             st.success("Đã xóa cache")
             time.sleep(1)
             st.rerun()
 
     # --- FETCH DATA ---
-    df = fetch_data_from_websocket(limit=data_limit)
+    # Real-time data từ Spark (Redis) cho chỉ số hiện tại
+    df_realtime = fetch_realtime_data()
     
-    if df.empty:
-        st.warning("⚠️ Không có dữ liệu. Vui lòng kiểm tra Server.")
-        return
-
-    latest = df.iloc[0]
+    # Historical data từ Cassandra cho xu hướng và bảng chi tiết
+    df_history = fetch_history_data(limit=data_limit)
+    
+    # Kiểm tra dữ liệu real-time
+    if df_realtime.empty:
+        st.warning("⚠️ Không có dữ liệu real-time. Vui lòng kiểm tra Spark Streaming và Redis.")
+        # Fallback: dùng dữ liệu lịch sử nếu có
+        if df_history.empty:
+            st.error("❌ Không có dữ liệu nào. Vui lòng kiểm tra Server.")
+            return
+        df_realtime = df_history.head(1)  # Dùng bản ghi mới nhất từ lịch sử
+    
+    latest = df_realtime.iloc[0]
     
     # --- ALERT SECTION ---
     # Hiển thị cảnh báo nếu AQI > 150
-    aqi_val = latest.get('aqi', 0)
-    if pd.notna(aqi_val) and float(aqi_val) > 150:
-        location_id = latest.get('location_id', 'N/A')
-        quality = latest.get('quality', 'N/A')
+    aqi_val = safe_get_value(latest, 'aqi', 0)
+    if aqi_val > 150:
+        location_id = safe_get_value(latest, 'location_id', None)
+        quality = latest.get('quality', 'N/A') if 'quality' in latest.index else 'N/A'
+        location_str = f"{int(location_id)}" if location_id is not None and location_id != 'N/A' else 'N/A'
         
-        if float(aqi_val) > 200:
-            st.error(f"🚨 **CẢNH BÁO NGUY HẠI**: Trạm {location_id} có AQI = **{int(aqi_val)}** ({quality}). Mức độ ô nhiễm rất cao!")
-        elif float(aqi_val) > 150:
-            st.warning(f"⚠️ **CẢNH BÁO**: Trạm {location_id} có AQI = **{int(aqi_val)}** ({quality}). Chất lượng không khí kém!")
+        if aqi_val > 200:
+            st.error(f"🚨 **CẢNH BÁO NGUY HẠI**: Trạm {location_str} có AQI = **{int(aqi_val)}** ({quality}). Mức độ ô nhiễm rất cao!")
+        elif aqi_val > 150:
+            st.warning(f"⚠️ **CẢNH BÁO**: Trạm {location_str} có AQI = **{int(aqi_val)}** ({quality}). Chất lượng không khí kém!")
     
     # --- HEADER INFO ---
     col_info1, col_info2 = st.columns([3, 1])
     with col_info1:
         try:
-            if 'datetime' in latest and pd.notna(latest['datetime']):
+            if 'datetime' in latest.index and pd.notna(latest['datetime']):
                 if isinstance(latest['datetime'], pd.Timestamp):
                     last_update = latest['datetime'].strftime('%H:%M:%S %d/%m/%Y')
                 else:
@@ -277,17 +332,18 @@ def main():
                 last_update = 'N/A'
         except Exception:
             last_update = 'N/A'
-        st.info(f"📅 Cập nhật lần cuối: **{last_update}** | Tổng số bản ghi: **{len(df)}**")
+        total_records = len(df_history) if not df_history.empty else 0
+        st.info(f"📅 Cập nhật lần cuối (Real-time): **{last_update}** | Tổng số bản ghi (History): **{total_records}**")
     
-    # --- HEADLINE SECTION (KPIs) ---
-    st.markdown('<div class="section-title">🎯 Chỉ số hiện tại</div>', unsafe_allow_html=True)
+    # --- HEADLINE SECTION (KPIs) - Dùng dữ liệu REAL-TIME từ Spark ---
+    st.markdown('<div class="section-title">🎯 Chỉ số hiện tại (Real-time từ Spark)</div>', unsafe_allow_html=True)
     
     # Layout: Gauge (Left) | Metrics & Info (Right)
     col_kpi1, col_kpi2, col_kpi3 = st.columns([2, 1, 1])
     
     with col_kpi1:
         # Biểu đồ Gauge cho AQI
-        aqi_val = latest.get('aqi', 0) if pd.notna(latest.get('aqi')) else 0
+        aqi_val = safe_get_value(latest, 'aqi', 0)
         st.plotly_chart(create_gauge_chart(aqi_val), use_container_width=True)
         
         # Cảnh báo text
@@ -300,15 +356,20 @@ def main():
         """, unsafe_allow_html=True)
 
     with col_kpi2:
-        st.metric("PM2.5 (Bụi mịn)", f"{latest.get('pm25', 0):.1f} µg/m³", delta_color="inverse")
-        st.metric("PM10 (Bụi thô)", f"{latest.get('pm10', 0):.1f} µg/m³")
-        st.metric("PM1 (Siêu mịn)", f"{latest.get('pm1', 0):.1f} µg/m³")
+        pm25_val = safe_get_value(latest, 'pm25', 0)
+        pm10_val = safe_get_value(latest, 'pm10', 0)
+        pm1_val = safe_get_value(latest, 'pm1', 0)
+        st.metric("PM2.5 (Bụi mịn)", f"{pm25_val:.1f} µg/m³", delta_color="inverse")
+        st.metric("PM10 (Bụi thô)", f"{pm10_val:.1f} µg/m³")
+        st.metric("PM1 (Siêu mịn)", f"{pm1_val:.1f} µg/m³")
 
     with col_kpi3:
-        st.metric("Nhiệt độ", f"{latest.get('temperature', 0):.1f} °C")
-        st.metric("Độ ẩm", f"{latest.get('relativehumidity', 0):.1f} %")
+        temp_val = safe_get_value(latest, 'temperature', 0)
+        humidity_val = safe_get_value(latest, 'relativehumidity', 0)
+        st.metric("Nhiệt độ", f"{temp_val:.1f} °C")
+        st.metric("Độ ẩm", f"{humidity_val:.1f} %")
         # Biểu đồ Donut tỷ lệ bụi
-        donut_chart = create_donut_chart(latest.get('pm25', 0), latest.get('pm10', 0))
+        donut_chart = create_donut_chart(pm25_val, pm10_val)
         if donut_chart is not None:
             st.plotly_chart(donut_chart, use_container_width=True)
         else:
@@ -316,34 +377,47 @@ def main():
 
     st.divider()
 
-    # --- TRENDS SECTION ---
-    st.markdown('<div class="section-title">📈 Xu hướng theo thời gian</div>', unsafe_allow_html=True)
+    # --- TRENDS SECTION - Dùng dữ liệu LỊCH SỬ từ Cassandra ---
+    st.markdown('<div class="section-title">📈 Xu hướng theo thời gian (Lịch sử từ Cassandra)</div>', unsafe_allow_html=True)
     
-    tab1, tab2 = st.tabs(["💨 Nồng độ Bụi", "🌡️ Môi trường"])
-    
-    with tab1:
-        st.plotly_chart(create_trend_chart(df, ['pm25', 'pm10'], "Diễn biến PM2.5 và PM10"), use_container_width=True)
-    
-    with tab2:
-        st.plotly_chart(create_trend_chart(df, ['temperature', 'relativehumidity'], "Diễn biến Nhiệt độ & Độ ẩm"), use_container_width=True)
-
-    # --- DATA TABLE SECTION ---
-    st.divider()
-    with st.expander("📋 Xem dữ liệu chi tiết", expanded=False):
-        # Stats
-        st.markdown("##### Thống kê nhanh")
-        stats = df[['aqi', 'pm25', 'pm10', 'temperature']].mean().to_frame().T
-        stats.index = ['Trung bình']
-        st.dataframe(stats.style.format("{:.2f}"), width='stretch', hide_index=True)
+    if df_history.empty:
+        st.warning("⚠️ Không có dữ liệu lịch sử từ Cassandra để hiển thị xu hướng.")
+    else:
+        tab1, tab2 = st.tabs(["💨 Nồng độ Bụi", "🌡️ Môi trường"])
         
-        st.markdown("##### Dữ liệu thô")
-        cols_to_show = ['datetime', 'aqi', 'quality', 'pm25', 'pm10', 'temperature', 'relativehumidity']
-        st.dataframe(
-            df[cols_to_show].head(100),
-            width='stretch',
-            height=300,
-            hide_index=True
-        )
+        with tab1:
+            st.plotly_chart(create_trend_chart(df_history, ['pm25', 'pm10'], "Diễn biến PM2.5 và PM10"), use_container_width=True)
+        
+        with tab2:
+            st.plotly_chart(create_trend_chart(df_history, ['temperature', 'relativehumidity'], "Diễn biến Nhiệt độ & Độ ẩm"), use_container_width=True)
+
+    # --- DATA TABLE SECTION - Dùng dữ liệu LỊCH SỬ từ Cassandra ---
+    st.divider()
+    with st.expander("📋 Xem dữ liệu chi tiết (Lịch sử từ Cassandra)", expanded=False):
+        if df_history.empty:
+            st.warning("⚠️ Không có dữ liệu lịch sử từ Cassandra để hiển thị.")
+        else:
+            # Stats
+            st.markdown("##### Thống kê nhanh")
+            stats_cols = ['aqi', 'pm25', 'pm10', 'temperature']
+            available_stats_cols = [col for col in stats_cols if col in df_history.columns]
+            if available_stats_cols:
+                stats = df_history[available_stats_cols].mean().to_frame().T
+                stats.index = ['Trung bình']
+                st.dataframe(stats.style.format("{:.2f}"), width='stretch', hide_index=True)
+            
+            st.markdown("##### Dữ liệu thô")
+            cols_to_show = ['datetime', 'aqi', 'quality', 'pm25', 'pm10', 'temperature', 'relativehumidity']
+            available_cols = [col for col in cols_to_show if col in df_history.columns]
+            if available_cols:
+                st.dataframe(
+                    df_history[available_cols].head(100),
+                    width='stretch',
+                    height=300,
+                    hide_index=True
+                )
+            else:
+                st.warning("⚠️ Không có cột dữ liệu phù hợp để hiển thị.")
 
     # --- AUTO REFRESH ---
     if auto_refresh:

@@ -22,7 +22,8 @@ CASSANDRA_KEYSPACE = os.getenv("CASSANDRA_KEYSPACE", "air_quality")
 CASSANDRA_TABLE = os.getenv("CASSANDRA_TABLE", "realtime_data")
 
 # Cấu hình Redis
-REDIS_HOST = os.getenv("REDIS_HOST", "redis")
+# Default là "localhost" vì Spark job chạy trên host, Redis container expose port ra host
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 
 def create_spark_session():
@@ -198,12 +199,33 @@ def main():
                 print(f"✗ Error writing to Cassandra: {e}")
             
             # Task B: Write to Redis (Real-time Snapshot)
+            redis_client = None
             try:
-                redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True, socket_connect_timeout=5)
+                redis_client = redis.Redis(
+                    host=REDIS_HOST, 
+                    port=REDIS_PORT, 
+                    decode_responses=True, 
+                    socket_connect_timeout=5,
+                    socket_timeout=5
+                )
+                # Test connection
+                redis_client.ping()
                 
                 # Convert Spark DataFrame to list of rows (avoid pandas/distutils issue in Python 3.13)
                 selected_df = df.select(
-                    "location_id", "datetime", "aqi", "pm25", "quality"
+                    "location_id",
+                    "datetime",
+                    "aqi",
+                    "quality",
+                    "pm25",
+                    "pm10",
+                    "pm1",
+                    "temperature",
+                    "relativehumidity",
+                    "um003",
+                    "aqi_pm25",
+                    "aqi_pm10",
+                    "processed_at",
                 )
                 
                 # Collect rows and process in Python
@@ -232,9 +254,19 @@ def main():
                         # Prepare hash mapping
                         hash_data = {
                             'aqi': str(int(row.aqi)) if row.aqi is not None else '0',
-                            'pm25': str(float(row.pm25)) if row.pm25 is not None else '0.0',
                             'quality': str(row.quality) if row.quality else 'N/A',
-                            'timestamp': str(row.datetime) if row.datetime else ''
+                            'timestamp': str(row.datetime) if row.datetime else '',
+
+                            # Full snapshot fields for real-time dashboard
+                            'pm25': str(float(row.pm25)) if row.pm25 is not None else '',
+                            'pm10': str(float(row.pm10)) if getattr(row, "pm10", None) is not None else '',
+                            'pm1': str(float(row.pm1)) if getattr(row, "pm1", None) is not None else '',
+                            'temperature': str(float(row.temperature)) if getattr(row, "temperature", None) is not None else '',
+                            'relativehumidity': str(float(row.relativehumidity)) if getattr(row, "relativehumidity", None) is not None else '',
+                            'um003': str(float(row.um003)) if getattr(row, "um003", None) is not None else '',
+                            'aqi_pm25': str(int(row.aqi_pm25)) if getattr(row, "aqi_pm25", None) is not None else '',
+                            'aqi_pm10': str(int(row.aqi_pm10)) if getattr(row, "aqi_pm10", None) is not None else '',
+                            'processed_at': str(row.processed_at) if getattr(row, "processed_at", None) is not None else '',
                         }
                         
                         # Use hset for multiple fields (Redis 4.0+)
@@ -250,12 +282,20 @@ def main():
                     
                     print(f"✓ Batch {epoch_id}: Updated Redis with {len(location_data)} locations")
                 
-                redis_client.close()
-                
-            except (redis.ConnectionError, redis.TimeoutError) as e:
-                print(f"⚠ Warning: Could not connect to Redis: {e}")
+            except (redis.ConnectionError, redis.TimeoutError, redis.RedisError) as e:
+                # Redis connection failed - log warning but don't fail the batch
+                # Cassandra write already succeeded, so this is non-critical
+                print(f"⚠ Warning: Could not connect to Redis at {REDIS_HOST}:{REDIS_PORT}: {e}")
             except Exception as e:
+                # Other errors (e.g., data processing issues)
                 print(f"⚠ Warning: Error writing to Redis: {e}")
+            finally:
+                # Ensure connection is closed even if error occurs
+                if redis_client:
+                    try:
+                        redis_client.close()
+                    except:
+                        pass  # Ignore errors during cleanup
         
         query = final_df.writeStream \
             .outputMode("append") \

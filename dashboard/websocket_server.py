@@ -100,21 +100,44 @@ class HybridDataStreamer:
                     # Extract location_id từ key (location:123 -> 123)
                     location_id = int(key.split(':')[1])
                     
+                    def _to_float(v):
+                        try:
+                            if v is None:
+                                return None
+                            v = str(v).strip()
+                            if v == "":
+                                return None
+                            return float(v)
+                        except Exception:
+                            return None
+
+                    def _to_int(v):
+                        try:
+                            if v is None:
+                                return None
+                            v = str(v).strip()
+                            if v == "":
+                                return None
+                            return int(float(v))
+                        except Exception:
+                            return None
+
                     # Parse dữ liệu từ hash
                     data.append({
                         'datetime': hash_data.get('timestamp', ''),
                         'location_id': location_id,
-                        'pm25': float(hash_data.get('pm25', 0.0)),
-                        'pm10': None,  # Redis chỉ lưu snapshot, không có đầy đủ fields
-                        'pm1': None,
-                        'temperature': None,
-                        'relativehumidity': None,
-                        'um003': None,
-                        'aqi': int(hash_data.get('aqi', 0)),
-                        'aqi_pm25': None,
-                        'aqi_pm10': None,
+                        # Full snapshot fields (Spark -> Redis)
+                        'pm25': _to_float(hash_data.get('pm25')),
+                        'pm10': _to_float(hash_data.get('pm10')),
+                        'pm1': _to_float(hash_data.get('pm1')),
+                        'temperature': _to_float(hash_data.get('temperature')),
+                        'relativehumidity': _to_float(hash_data.get('relativehumidity')),
+                        'um003': _to_float(hash_data.get('um003')),
+                        'aqi': _to_int(hash_data.get('aqi')) or 0,
+                        'aqi_pm25': _to_int(hash_data.get('aqi_pm25')),
+                        'aqi_pm10': _to_int(hash_data.get('aqi_pm10')),
                         'quality': hash_data.get('quality', 'N/A'),
-                        'processed_at': hash_data.get('timestamp', '')
+                        'processed_at': hash_data.get('processed_at', hash_data.get('timestamp', ''))
                     })
             
             # Sort by datetime descending

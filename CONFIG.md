@@ -30,6 +30,15 @@ export CASSANDRA_TABLE="realtime_data"
 export SINK_MODE="cassandra"  # or "console"
 ```
 
+### Redis Configuration
+
+```bash
+# Default là "localhost" vì Spark job và WebSocket server chạy trên host
+# Redis container expose port 6379 ra host
+export REDIS_HOST="localhost"  # Default: "localhost"
+export REDIS_PORT="6379"      # Default: "6379"
+```
+
 ### WebSocket Server Configuration
 
 ```bash
@@ -54,6 +63,10 @@ CASSANDRA_TABLE=realtime_data
 # Spark
 SINK_MODE=cassandra
 
+# Redis
+REDIS_HOST=localhost
+REDIS_PORT=6379
+
 # WebSocket
 HTTP_PORT=8765
 ```
@@ -70,9 +83,11 @@ File `docker/docker-compose.yml` đã được cấu hình với:
 
 - **3 Kafka Brokers**: kafka-1 (9092), kafka-2 (9093), kafka-3 (9094)
 - **2 Cassandra Nodes**: cassandra-1 (9042), cassandra-2 (9043)
+- **1 Redis Instance**: redis (6379)
 - **Resource Limits**: 
   - Kafka: 512MB mỗi broker
   - Cassandra: 1GB mỗi node
+  - Redis: 256MB
   - Zookeeper: 512MB
 
 ## Lưu ý quan trọng
@@ -84,8 +99,15 @@ File `docker/docker-compose.yml` đã được cấu hình với:
 3. **Port Mapping**: Các port được map ra host để các ứng dụng chạy ngoài Docker có thể kết nối:
    - Kafka: 9092, 9093, 9094
    - Cassandra: 9042, 9043
+   - Redis: 6379
 
-4. **Resource Limits**: Đã thêm giới hạn memory để tránh treo máy. Có thể điều chỉnh trong `docker-compose.yml` nếu cần.
+4. **Redis Connection**: 
+   - Spark job và WebSocket server chạy trên host (không trong Docker network)
+   - Redis container expose port 6379 ra host
+   - Do đó, `REDIS_HOST` phải là `"localhost"` (không phải `"redis"`)
+   - Nếu chạy Spark/WebSocket trong Docker container, thì dùng `REDIS_HOST="redis"`
+
+5. **Resource Limits**: Đã thêm giới hạn memory để tránh treo máy. Có thể điều chỉnh trong `docker-compose.yml` nếu cần.
 
 ## Kiểm tra Cluster
 
